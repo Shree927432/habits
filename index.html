@@ -182,6 +182,26 @@ button{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
 .add:active{transform:scale(.98)}
 .bit{position:fixed;z-index:30;pointer-events:none;border-radius:2px}
 
+/* ---------- reminders ---------- */
+.bellbox{
+  width:36px;height:36px;border-radius:12px;flex:none;display:grid;place-items:center;
+  color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,transparent);
+}
+.bellbox svg{width:18px;height:18px}
+.row:disabled{opacity:.5}
+.sub{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sub svg{width:12px;height:12px;vertical-align:-1.5px;margin-left:6px}
+.sub .stale{color:var(--accent);font-weight:600}
+.lead{font-size:15px;color:var(--muted);line-height:1.5}
+.lead b,.steps b{color:var(--ink);font-weight:650}
+.steps{margin:18px 0 0;padding:0;list-style:none;counter-reset:s;display:grid;gap:14px}
+.steps li{counter-increment:s;display:flex;gap:12px;font-size:15px;line-height:1.45}
+.steps li::before{
+  content:counter(s);flex:none;width:26px;height:26px;border-radius:50%;background:var(--ink);color:var(--bg);
+  display:grid;place-items:center;font-size:13px;font-weight:700;
+}
+.sheet .fine{text-align:left;margin-top:18px}
+
 /* ---------- notes ---------- */
 textarea, input[type=text], input[type=time]{
   font:inherit;color:inherit;width:100%;background:var(--card);border:0;
@@ -339,6 +359,7 @@ const ICON = {
   plus: svg('<path d="M12 5v14M5 12h14"/>', 2.4),
   left: svg('<path d="M15 5l-7 7 7 7"/>'),
   right: svg('<path d="M9 5l7 7-7 7"/>'),
+  bell: svg('<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>'),
 };
 
 /* ---------- dates ---------- */
@@ -426,6 +447,81 @@ const bySlot = list => SLOTS.map(([id, label]) => ({
   items: list.filter(h => (h.slot || 'anytime') === id)
              .sort((a, b) => (a.time || '99') < (b.time || '99') ? -1 : (a.time || '99') > (b.time || '99') ? 1 : 0),
 })).filter(g => g.items.length);
+
+/* ---------- reminders ----------
+   A web app cannot wake itself up when it is closed, so reminders are handed to the phone's
+   calendar: each habit becomes a repeating calendar event with an alert, as an .ics file. */
+const sig = h => `${h.name}|${h.time}|${[...h.days].sort().join('')}`;      // what the calendar event was made from
+const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'habit';
+const icsEsc = s => String(s).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+function icsFold(line) {                                  // lines may be at most 75 bytes
+  const enc = new TextEncoder();
+  let out = '', cur = '', bytes = 0;
+  for (const ch of line) {
+    const b = enc.encode(ch).length;
+    if (bytes + b > 73) { out += cur + '\r\n '; cur = ''; bytes = 1; }
+    cur += ch; bytes += b;
+  }
+  return out + cur;
+}
+function icsFor(list) {
+  const BY = ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'];
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Habits//Habit tracker//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH'];
+  for (const h of list) {
+    let k = today(); while (!due(h, k)) k = addDays(k, 1);            // first day the habit is scheduled
+    const [hh, mm] = h.time.split(':').map(Number), end = hh * 60 + mm + 10;
+    const endDay = end >= 1440 ? addDays(k, 1) : k;
+    const at = (key, mins) => `${key.replace(/-/g, '')}T${pad(Math.floor(mins / 60))}${pad(mins % 60)}00`;   // local "floating" time
+    lines.push(
+      'BEGIN:VEVENT', `UID:${h.id}@habits`, `DTSTAMP:${stamp}`, `SEQUENCE:${h.seq || 0}`,
+      `DTSTART:${at(k, hh * 60 + mm)}`, `DTEND:${at(endDay, end % 1440)}`,
+      `RRULE:${h.days.length === 7 ? 'FREQ=DAILY' : 'FREQ=WEEKLY;BYDAY=' + [...h.days].sort().map(i => BY[i]).join(',')}`,
+      `SUMMARY:${icsEsc(h.name)}`, 'DESCRIPTION:Habit reminder from the Habits app', 'TRANSP:TRANSPARENT',
+      'BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${icsEsc(h.name)}`, 'TRIGGER:PT0M', 'END:VALARM',
+      'END:VEVENT');
+  }
+  lines.push('END:VCALENDAR');
+  return lines.map(icsFold).join('\r\n') + '\r\n';
+}
+function download(name, text, type) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], {type}));
+  a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+function addReminders(list) {
+  for (const h of list) { h.seq = (h.seq || 0) + 1; h.remind = sig(h); }
+  save();
+  const file = list.length === 1 ? `${slug(list[0].name)}-reminder.ics` : 'habit-reminders.ics';
+  download(file, icsFor(list), 'text/calendar;charset=utf-8');
+  render();
+  modal.innerHTML = `
+  <div class="scrim" data-close></div>
+  <div class="sheet">
+    <div class="grab"></div>
+    <h2>One more step</h2>
+    <p class="lead">A file named <b>${esc(file)}</b> was just downloaded. It holds ${list.length === 1 ? 'a repeating alert for this habit' : `repeating alerts for ${list.length} habits`}.</p>
+    <ol class="steps">
+      <li><span>Tap <b>Open</b> on the download message, or open the file from your Downloads.</span></li>
+      <li><span>Choose your calendar app and tap <b>Save</b> or <b>Add</b>.</span></li>
+    </ol>
+    <p class="fine">Your calendar now reminds you even when this app is closed. To stop a reminder, delete its event in the calendar. If you change a habit's time or days, add its reminder again.</p>
+    <div class="actions"><button type="button" class="btn" data-close>Done</button></div>
+  </div>`;
+  modal.hidden = false; modal.offsetHeight; modal.classList.add('open');
+}
+// keep the reminder row in the habit sheet in step with the form
+function refreshRemind() {
+  const sub = $('#f-remind'); if (!sub) return;
+  const time = $('#f-time').value;
+  const now = sig({name: $('#f-name').value.trim(), time, days: [...modal.querySelectorAll('[data-dow].on')].map(b => +b.dataset.dow)});
+  sub.textContent = !time ? 'Set an exact time above first'
+    : editing && editing.remind === now ? `Added for ${fmtTime(time)} · tap to add again`
+    : editing && editing.remind ? 'Habit changed · tap to update the reminder'
+    : `Alert at ${fmtTime(time)} on the days above`;
+}
 
 /* ---------- views ---------- */
 function todayView() {
@@ -544,7 +640,8 @@ function calendarView() {
 }
 
 function habitsView() {
-  const groups = bySlot(state.habits);
+  const groups = bySlot(state.habits), timed = state.habits.filter(h => h.time).length;
+  const bell = h => !h.remind ? '' : h.remind === sig(h) ? ICON.bell : `<span class="stale">${ICON.bell} update reminder</span>`;
   return `
   <header class="head">
     <div><p class="eyebrow">${state.habits.length} ${state.habits.length === 1 ? 'habit' : 'habits'}</p><h1>Habits</h1></div>
@@ -552,9 +649,14 @@ function habitsView() {
   </header>
   ${groups.length ? groups.map(g => `<section class="group"><p class="label">${g.label}</p><div class="card">${
     g.items.map(h => `<button class="row" data-edit="${h.id}">
-      <span class="txt"><span class="name">${esc(h.name)}</span><span class="sub">${schedule(h)}</span></span>
+      <span class="txt"><span class="name">${esc(h.name)}</span><span class="sub">${schedule(h)}${bell(h)}</span></span>
       <span class="chev">${ICON.right}</span></button>`).join('')}</div></section>`).join('')
     : `<div class="empty"><b>No habits yet</b>Add the things you want to do regularly<br>and give each a time of day.<br><button class="btn" data-new>Add a habit</button></div>`}
+  ${state.habits.length ? `<section class="group"><p class="label">Reminders</p><div class="card">
+    <button class="row" data-remindall${timed ? '' : ' disabled'}>
+      <span class="bellbox">${ICON.bell}</span>
+      <span class="txt"><span class="name">Add all reminders to calendar</span><span class="sub">${timed ? `${timed} ${timed === 1 ? 'habit has' : 'habits have'} an exact time` : 'Give a habit an exact time first'}</span></span>
+    </button></div></section>` : ''}
   <div class="foot"><button data-export>Export backup</button><button data-import>Restore backup</button></div>
   <p class="fine">Everything is stored only on this device.<br>Export a backup now and then to keep it safe.</p>`;
 }
@@ -661,6 +763,11 @@ function openSheet(h) {
     <div class="timerow"><input id="f-time" type="time" value="${esc(d.time || '')}" aria-label="Exact time"><button type="button" data-cleartime>Clear</button></div>
     <p class="label">Repeat</p>
     <div class="dows">${DAY_LETTER.map((l, i) => `<button type="button" class="chip${d.days.includes(i) ? ' on' : ''}" data-dow="${i}" aria-label="${DAY_SHORT[i]}">${l}</button>`).join('')}</div>
+    <p class="label">Reminder</p>
+    <div class="card"><button type="button" class="row" data-remind>
+      <span class="bellbox">${ICON.bell}</span>
+      <span class="txt"><span class="name">Add reminder to calendar</span><span class="sub" id="f-remind"></span></span>
+    </button></div>
     <div class="actions">
       ${h ? '<button type="button" class="ghost danger" data-delete>Delete</button>' : '<button type="button" class="ghost" data-close>Cancel</button>'}
       <button class="btn">${h ? 'Save' : 'Add habit'}</button>
@@ -669,13 +776,15 @@ function openSheet(h) {
   modal.hidden = false;
   modal.offsetHeight;
   modal.classList.add('open');
+  refreshRemind();
   if (!h) $('#f-name').focus();
 }
 function closeSheet() {
   modal.classList.remove('open');
   setTimeout(() => { if (!modal.classList.contains('open')) { modal.hidden = true; modal.innerHTML = ''; } }, 320);
 }
-function saveHabit() {
+// check the sheet and store what is in it; gives back the habit, or nothing if the form is incomplete
+function commitHabit() {
   const name = $('#f-name').value.trim();
   if (!name) { $('#f-name').focus(); return toast('Give your habit a name'); }
   const days = [...modal.querySelectorAll('[data-dow].on')].map(b => +b.dataset.dow);
@@ -683,11 +792,20 @@ function saveHabit() {
   const on = modal.querySelector('[data-slot].on');
   const data = {name, slot: on ? on.dataset.slot : 'anytime', time: $('#f-time').value || '', days};
   if (editing) Object.assign(editing, data);
-  else state.habits.push({id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), created: today(), ...data});
-  save(); closeSheet(); render();
+  else state.habits.push(editing = {id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), created: today(), ...data});
+  save();
+  return editing;
+}
+function saveHabit() {
+  if (commitHabit()) { closeSheet(); render(); }
+}
+function remindHabit() {
+  if (!$('#f-time').value) { $('#f-time').focus(); return toast('Set an exact time first'); }
+  const h = commitHabit();
+  if (h) addReminders([h]);
 }
 function deleteHabit() {
-  if (!editing || !confirm(`Delete “${editing.name}” and its history?`)) return;
+  if (!editing || !confirm(`Delete “${editing.name}” and its history?${editing.remind ? '\n\nIts reminder stays in your calendar until you delete that event there.' : ''}`)) return;
   const id = editing.id;
   state.habits = state.habits.filter(h => h.id !== id);
   for (const k in state.log) { delete state.log[k][id]; if (!Object.keys(state.log[k]).length) delete state.log[k]; }
@@ -728,7 +846,7 @@ function toast(msg) {
 
 /* ---------- events ---------- */
 document.addEventListener('click', e => {
-  const el = e.target.closest('[data-streak],[data-view],[data-toggle],[data-date],[data-new],[data-edit],[data-habit],[data-month],[data-slot],[data-dow],[data-cleartime],[data-close],[data-delete],[data-export],[data-import]');
+  const el = e.target.closest('[data-streak],[data-view],[data-toggle],[data-date],[data-new],[data-edit],[data-habit],[data-month],[data-slot],[data-dow],[data-cleartime],[data-close],[data-delete],[data-export],[data-import],[data-remind],[data-remindall]');
   if (!el) return;
   const d = el.dataset;
   if ('streak' in d) { calHabit = d.streak; calMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1); go('calendar'); }
@@ -746,8 +864,10 @@ document.addEventListener('click', e => {
   else if ('habit' in d) { const sc = $('.chips').scrollLeft; calHabit = d.habit; render(); $('.chips').scrollLeft = sc; }
   else if ('month' in d) { calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() + +d.month, 1); render(); }
   else if ('slot' in d) modal.querySelectorAll('[data-slot]').forEach(b => b.classList.toggle('on', b === el));
-  else if ('dow' in d) el.classList.toggle('on');
-  else if ('cleartime' in d) $('#f-time').value = '';
+  else if ('dow' in d) { el.classList.toggle('on'); refreshRemind(); }
+  else if ('cleartime' in d) { $('#f-time').value = ''; refreshRemind(); }
+  else if ('remindall' in d) addReminders(state.habits.filter(h => h.time));
+  else if ('remind' in d) remindHabit();
   else if ('close' in d) closeSheet();
   else if ('delete' in d) deleteHabit();
   else if ('export' in d) exportData();
@@ -761,12 +881,14 @@ document.addEventListener('input', e => {
     autosize(e.target);
     clearTimeout(noteTimer); noteTimer = setTimeout(flushNote, 400);
   }
+  if (e.target.id === 'f-name' || e.target.id === 'f-time') refreshRemind();
 });
 document.addEventListener('change', e => {
   if (e.target.id === 'f-time' && e.target.value) {       // picking a time suggests its slot
     const hr = +e.target.value.slice(0, 2), slot = hr < 12 ? 'morning' : hr < 17 ? 'afternoon' : 'evening';
     modal.querySelectorAll('[data-slot]').forEach(b => b.classList.toggle('on', b.dataset.slot === slot));
   }
+  if (e.target.id === 'f-time') refreshRemind();
   if (e.target.id === 'file' && e.target.files[0]) { importData(e.target.files[0]); e.target.value = ''; }
 });
 document.addEventListener('keydown', e => {
