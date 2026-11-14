@@ -202,6 +202,34 @@ button{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
 }
 .sheet .fine{text-align:left;margin-top:18px}
 
+/* ---------- reflection ---------- */
+.journal label{display:block;padding:13px 18px 9px}
+.journal label + label{border-top:1px solid var(--line)}
+.journal span{display:block;font-size:12px;font-weight:650;color:var(--muted);letter-spacing:.03em}
+.journal textarea, .journal textarea:focus{box-shadow:none;background:none;border-radius:0;padding:3px 0 0;min-height:30px}
+
+/* ---------- coach ---------- */
+.pad{padding:18px}
+.pad > b{display:block;font-size:17px;font-weight:700;letter-spacing:-.01em}
+.pad > p{font-size:15px;color:var(--muted);line-height:1.5;margin:6px 0 14px}
+.wide{width:100%;margin-top:12px}
+.btn:disabled{opacity:.5}
+.ask{display:flex;gap:10px;margin-top:12px;align-items:center}
+.ask input{flex:1;min-width:0;border-radius:26px;padding:13px 18px}
+.meta{font-size:12px;font-weight:650;color:var(--muted);letter-spacing:.03em;margin-bottom:10px;overflow-wrap:anywhere}
+.md h3{font-size:15px;font-weight:700;margin:18px 0 6px}
+.md h3:first-child{margin-top:0}
+.md p{font-size:15px;line-height:1.55;margin:0 0 10px}
+.md ul,.md ol{margin:0 0 10px;padding-left:20px}
+.md li{font-size:15px;line-height:1.5;margin-bottom:6px}
+.md code{font-size:13px;background:var(--line);padding:1px 5px;border-radius:5px}
+.md > :last-child{margin-bottom:0}
+.waiting{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:15px}
+.waiting i{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pulse 1s infinite alternate}
+@keyframes pulse{from{opacity:.25;transform:scale(.8)}to{opacity:1;transform:scale(1.15)}}
+.err{color:var(--danger);font-size:15px;line-height:1.5}
+.linkish{display:block;margin:22px auto 0;padding:10px 14px;font-size:13px;font-weight:600;color:var(--muted)}
+
 /* ---------- notes ---------- */
 textarea, input[type=text], input[type=time]{
   font:inherit;color:inherit;width:100%;background:var(--card);border:0;
@@ -267,7 +295,7 @@ nav div{
   box-shadow:0 0 0 1px var(--hair),0 16px 36px -12px rgba(15,10,0,.32);
 }
 nav button{
-  display:flex;align-items:center;height:50px;padding:0 17px;border-radius:25px;
+  display:flex;align-items:center;height:50px;padding:0 15px;border-radius:25px;
   font-size:14px;font-weight:650;color:var(--muted);
   transition:background .3s var(--ease),color .3s var(--ease);
 }
@@ -336,6 +364,10 @@ nav button:active svg{transform:scale(.88)}
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6.5h11M9 12h11M9 17.5h11"/><circle cx="4.5" cy="6.5" r=".6"/><circle cx="4.5" cy="12" r=".6"/><circle cx="4.5" cy="17.5" r=".6"/></svg>
     <span>Habits</span>
   </button>
+  <button data-view="coach">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4l1.8 4.7L17.5 10.5l-4.7 1.8L11 17l-1.8-4.7L4.5 10.5l4.7-1.8z"/><path d="M18.5 15v4M16.5 17h4"/></svg>
+    <span>Coach</span>
+  </button>
 </div></nav>
 
 <div id="modal" hidden></div>
@@ -376,9 +408,9 @@ const fmtTime = t => t ? new Date(`2000-01-01T${t}`).toLocaleTimeString([], {hou
 function load() {
   try {
     const s = JSON.parse(localStorage.getItem(KEY));
-    if (s && Array.isArray(s.habits)) return {habits: s.habits, log: s.log || {}, notes: s.notes || {}};
+    if (s && Array.isArray(s.habits)) return {habits: s.habits, log: s.log || {}, notes: s.notes || {}, journal: s.journal || {}, reviews: s.reviews || []};
   } catch (e) {}
-  return {habits: [], log: {}, notes: {}};
+  return {habits: [], log: {}, notes: {}, journal: {}, reviews: []};
 }
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(state)); }
@@ -523,6 +555,189 @@ function refreshRemind() {
     : `Alert at ${fmtTime(time)} on the days above`;
 }
 
+/* ---------- coach (Claude) ----------
+   The user's own Anthropic API key, kept on this device, calls Claude directly from the page. */
+const KEY_API = 'habit-tracker.apikey';                    // stored apart from the data, so it never lands in a backup
+const getKey = () => { try { return localStorage.getItem(KEY_API) || ''; } catch (e) { return ''; } };
+const COACH_SYSTEM = `You are a habit and productivity coach inside a personal habit-tracker app. The user sends their habit data and their own daily reflections.
+
+Ground everything in their data: name the habits, days and numbers you are reacting to, and quote their reflections when they explain a pattern. Be direct and kind. Skip generic productivity advice that would apply to anyone. If there is too little data to see a pattern, say so plainly and say what would be worth writing down. Today may still be in progress, so do not count today's unfinished habits as misses.
+
+This is read on a phone: keep it tight. Use simple Markdown only - "## " headings, "- " bullets, **bold** for the key phrase. No tables.`;
+let coachDays = 7, sdk = null, lastAnswer = null;
+const coach = {busy: false, text: '', label: '', error: '', show: 0};   // show: index into state.reviews, or 'answer'
+
+// just enough Markdown for the coach's replies; everything is escaped first
+function md(src) {
+  const inline = t => esc(t).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`([^`]+)`/g, '<code>$1</code>');
+  let out = '', list = '';
+  const close = () => { if (list) { out += `</${list}>`; list = ''; } };
+  for (const raw of src.split('\n')) {
+    const line = raw.trim();
+    let m;
+    if (!line) close();
+    else if ((m = line.match(/^#{1,4}\s+(.*)/))) { close(); out += `<h3>${inline(m[1])}</h3>`; }
+    else if ((m = line.match(/^(?:[-*•]|(\d+)[.)])\s+(.*)/))) {
+      const want = m[1] ? 'ol' : 'ul';
+      if (list !== want) { close(); out += `<${want}>`; list = want; }
+      out += `<li>${inline(m[2])}</li>`;
+    } else { close(); out += `<p>${inline(line)}</p>`; }
+  }
+  close();
+  return out;
+}
+// the last n days as plain text: one line per habit, then one line per day with the reflections
+function coachData(n) {
+  const t = today(), start = addDays(t, -(n - 1));
+  const lines = [`Today is ${parse(t).toDateString()}. Period: ${start} to ${t} (${n} days).`, '', 'HABITS'];
+  for (const h of state.habits) {
+    let sched = 0, hit = 0;
+    const missed = {};
+    for (let k = start; k <= t; k = addDays(k, 1)) {
+      if (!counts(h, k)) continue;
+      sched++;
+      if (done(h, k)) hit++; else if (k !== t) missed[DAY_SHORT[dow(k)]] = (missed[DAY_SHORT[dow(k)]] || 0) + 1;
+    }
+    const s = streaks(h), miss = Object.entries(missed).map(([d, c]) => `${d} x${c}`).join(', ');
+    lines.push(`- ${h.name} | ${h.slot || 'anytime'}${h.time ? ' at ' + h.time : ''} | ${h.days.length === 7 ? 'every day' : [...h.days].sort().map(i => DAY_SHORT[i]).join(' ')} | tracked since ${h.created} | done ${hit} of ${sched} | current streak ${s.cur}, best ${s.best}${miss ? ' | missed on ' + miss : ''}`);
+  }
+  lines.push('', 'DAY BY DAY');
+  for (let k = start; k <= t; k = addDays(k, 1)) {
+    const hs = state.habits.filter(h => counts(h, k)), j = state.journal[k] || {};
+    const names = ok => hs.filter(h => done(h, k) === ok).map(h => h.name).join('; ') || 'none';
+    let line = `${k} ${DAY_SHORT[dow(k)]} | done: ${names(true)} | not done: ${names(false)}`;
+    if (j.win) line += ` | what worked: ${j.win}`;
+    if (j.fail) line += ` | what didn't: ${j.fail}`;
+    if (state.notes[k]) line += ` | notes: ${state.notes[k]}`;
+    lines.push(line);
+  }
+  return lines.join('\n');
+}
+const paintCoach = () => { const el = $('#coach-out'); if (el) el.innerHTML = md(coach.text); };
+// send one message to Claude and stream the reply into the Coach tab; gives back the text, or '' on failure
+async function askClaude(label, content) {
+  if (coach.busy) return '';
+  Object.assign(coach, {busy: true, text: '', label, error: ''});
+  render();
+  try {
+    const Anthropic = sdk || (sdk = (await import('./vendor/anthropic-sdk.js')).default);
+    try {
+      const client = new Anthropic({apiKey: getKey(), dangerouslyAllowBrowser: true});
+      const params = {
+        model: 'claude-opus-5-5', max_tokens: 16000,
+        thinking: {type: 'adaptive'}, output_config: {effort: 'medium'},
+        system: COACH_SYSTEM, messages: [{role: 'user', content}],
+      };
+      const run = async withFallback => {
+        // if the model declines, let the API retry on its fallback model inside the same call
+        const stream = withFallback
+          ? client.beta.messages.stream({...params, betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default'})
+          : client.messages.stream(params);
+        for await (const event of stream) {
+          if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') { coach.text += event.delta.text; paintCoach(); }
+        }
+        return stream.finalMessage();
+      };
+      let msg;
+      try { msg = await run(true); }
+      catch (err) {
+        if (!(err instanceof Anthropic.BadRequestError) || coach.text) throw err;
+        msg = await run(false);                              // same request without the fallback option
+      }
+      if (msg.stop_reason === 'refusal') coach.error = 'Claude declined to answer this one. Try rephrasing.';
+      else if (msg.stop_reason === 'max_tokens') coach.text += '\n\n(The answer was cut off for length.)';
+    } catch (err) {
+      coach.error = err instanceof Anthropic.AuthenticationError ? 'That API key was not accepted. Remove it below and save a working key.'
+        : err instanceof Anthropic.PermissionDeniedError ? 'This API key is not allowed to use that model.'
+        : err instanceof Anthropic.RateLimitError ? 'Too many requests right now. Wait a minute and try again.'
+        : err instanceof Anthropic.APIConnectionError ? 'Could not reach Claude. Check your internet connection.'
+        : err instanceof Anthropic.APIError ? `Claude returned an error (${err.status}): ${err.message}`
+        : 'Something went wrong: ' + (err && err.message || err);
+    }
+  } catch (err) {
+    coach.error = 'Could not load the AI component. Check your internet connection.';
+  }
+  coach.busy = false;
+  if (view === 'coach') render();
+  return coach.error ? '' : coach.text;
+}
+async function reviewPeriod() {
+  if (!state.habits.length) return toast('Add a habit first');
+  const n = coachDays;
+  const text = await askClaude(`Review · last ${n} days`, `Review my last ${n} days. Use exactly these four sections:
+
+## Overview
+Two or three sentences on how the period went.
+## What's working
+Habits or patterns that are holding, with the numbers.
+## What's slipping
+Where I miss, and any pattern by weekday, time of day, or what my reflections say got in the way.
+## Try next
+Two or three specific changes for the coming days, each tied to something in my data.
+
+<data>
+${coachData(n)}
+</data>`);
+  if (!text) return;
+  state.reviews.unshift({at: today(), days: n, text});
+  state.reviews.length = Math.min(state.reviews.length, 8);
+  save();
+  coach.show = 0;
+  if (view === 'coach') render();
+}
+async function askCoach() {
+  const q = $('#f-ask').value.trim();
+  if (!q) return $('#f-ask').focus();
+  const prev = state.reviews[0];
+  const text = await askClaude(q, `${q}
+
+Answer from my data below.${prev ? `
+
+<your_last_review date="${prev.at}">
+${prev.text}
+</your_last_review>` : ''}
+
+<data>
+${coachData(30)}
+</data>`);
+  if (!text) return;
+  lastAnswer = {q, text};
+  coach.show = 'answer';
+  if (view === 'coach') render();
+}
+function coachView() {
+  const head = `<header class="head"><div><p class="eyebrow">Powered by Claude</p><h1>Coach</h1></div></header>`;
+  if (!getKey()) return `${head}
+  <section class="group"><div class="card pad">
+    <b>Connect Claude</b>
+    <p>Get a review of your habits and reflections, with specific suggestions. Paste your Anthropic API key once to switch it on.</p>
+    <input id="f-key" type="password" placeholder="Anthropic API key" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Anthropic API key">
+    <button class="btn wide" data-savekey>Save key</button>
+  </div></section>
+  <p class="fine">Create a key at console.anthropic.com under API keys. It is stored only in this browser and is left out of backups.<br><br>Each review is billed to your Anthropic account, usually a few cents. When you ask, your habits and reflections for the period are sent to Anthropic.</p>`;
+
+  const shown = coach.show === 'answer' ? lastAnswer : state.reviews[coach.show];
+  const when = r => `${parse(r.at).toLocaleDateString(undefined, {weekday: 'short', day: 'numeric', month: 'short'})} · last ${r.days} days`;
+  let out;
+  if (coach.busy) out = `<p class="meta">${esc(coach.label)}</p><div class="md" id="coach-out">${md(coach.text)}</div>${coach.text ? '' : '<div class="waiting"><i></i>Reading your data…</div>'}`;
+  else if (coach.error) out = `<p class="err">${esc(coach.error)}</p>`;
+  else if (shown) out = `<p class="meta">${coach.show === 'answer' ? 'You asked: ' + esc(shown.q) : when(shown)}</p><div class="md">${md(shown.text)}</div>`;
+  else out = `<div class="md"><p>Tap <b>Review</b> for a read on how your habits are going, or ask a question below. The more you write in each day's reflection, the more specific the advice.</p></div>`;
+  const earlier = state.reviews.map((r, i) => i === coach.show && !coach.busy ? '' : `<button class="row" data-showreview="${i}"><span class="txt"><span class="name">${when(r)}</span></span><span class="chev">${ICON.right}</span></button>`).join('');
+
+  return `${head}
+  <div class="chips">${[7, 30].map(n => `<button class="chip${coachDays === n ? ' on' : ''}" data-period="${n}">Last ${n} days</button>`).join('')}</div>
+  <button class="btn wide" data-review${coach.busy ? ' disabled' : ''}>Review my last ${coachDays} days</button>
+  <div class="ask">
+    <input id="f-ask" type="text" placeholder="Ask your coach anything" maxlength="300" enterkeyhint="send" aria-label="Question for your coach">
+    <button class="round" data-ask aria-label="Ask"${coach.busy ? ' disabled' : ''}>${ICON.right}</button>
+  </div>
+  <section class="group"><div class="card pad">${out}</div></section>
+  ${earlier ? `<section class="group"><p class="label">Earlier reviews</p><div class="card">${earlier}</div></section>` : ''}
+  <button class="linkish" data-removekey>Remove API key</button>
+  <p class="fine">Reviews are billed to your Anthropic account. Your habits and reflections for the period are sent to Anthropic each time you ask.</p>`;
+}
+
 /* ---------- views ---------- */
 function todayView() {
   const t = today(), d = parse(day);
@@ -559,7 +774,7 @@ function todayView() {
       }).join('')}</div></section>`).join('');
   }
 
-  const hr = new Date().getHours();
+  const hr = new Date().getHours(), jr = state.journal[day] || {};
   const greeting = hr < 4 ? 'Up late' : hr < 12 ? 'Good morning' : hr < 17 ? 'Good afternoon' : 'Good evening';
   const left = list.length - n, perfect = list.length ? streaks(null).cur : 0;
   const hero = list.length ? `
@@ -587,8 +802,12 @@ function todayView() {
   ${body}
   ${state.habits.length ? `<button class="add" data-new>${ICON.plus}Add habit</button>` : ''}
   <section class="group">
-    <p class="label">Notes</p>
-    <textarea id="note" placeholder="${day === t ? 'How is today going?' : 'How did this day go?'}" aria-label="Notes for this day">${esc(state.notes[day] || '')}</textarea>
+    <p class="label">Reflection</p>
+    <div class="card journal">
+      <label><span>What worked</span><textarea data-j="win" rows="1" placeholder="A win, however small">${esc(jr.win || '')}</textarea></label>
+      <label><span>What didn't</span><textarea data-j="fail" rows="1" placeholder="What got in the way">${esc(jr.fail || '')}</textarea></label>
+      <label><span>Notes</span><textarea data-j="note" rows="1" placeholder="${day === t ? 'Anything else, or the plan for tomorrow' : 'Anything else about this day'}">${esc(state.notes[day] || '')}</textarea></label>
+    </div>
   </section>
   ${state.habits.length ? '<p class="fine">Swipe sideways to change day · hold a habit to edit it<br>Tap a streak to see it on the calendar</p>' : ''}`;
 }
@@ -616,7 +835,7 @@ function calendarView() {
       if (!hs.length) cls = ' off'; else if (dn) a = dn === hs.length ? 1 : .14 + .5 * dn / hs.length;
     }
     const full = a === 1, link = full && prevFull && (lead + d - 1) % 7 !== 0;
-    cells += `<button class="cell${cls}${a > .6 ? ' inv' : ''}${k === t ? ' now' : ''}" data-date="${k}" style="--a:${a}">${link ? '<u></u>' : ''}<i></i><span>${d}</span>${state.notes[k] ? '<em></em>' : ''}</button>`;
+    cells += `<button class="cell${cls}${a > .6 ? ' inv' : ''}${k === t ? ' now' : ''}" data-date="${k}" style="--a:${a}">${link ? '<u></u>' : ''}<i></i><span>${d}</span>${state.notes[k] || state.journal[k] ? '<em></em>' : ''}</button>`;
     prevFull = full;
   }
 
@@ -663,7 +882,7 @@ function habitsView() {
 
 function render() {
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.view === view));
-  app.innerHTML = view === 'today' ? todayView() : view === 'calendar' ? calendarView() : habitsView();
+  app.innerHTML = view === 'today' ? todayView() : view === 'calendar' ? calendarView() : view === 'coach' ? coachView() : habitsView();
   if (view === 'today') {
     const strip = $('#strip'), on = strip.querySelector('.on');
     strip.scrollLeft = stripScroll != null ? stripScroll : on.offsetLeft - strip.clientWidth / 2 + on.offsetWidth / 2;
@@ -672,7 +891,7 @@ function render() {
       const fg = ring.querySelector('.fg'); fg.getBoundingClientRect();
       fg.style.strokeDashoffset = RING_C * (1 - ring.dataset.to);
     }
-    autosize($('#note'));
+    document.querySelectorAll('[data-j]').forEach(autosize);
     burst($('.row.pop .box'), 8, 26, 0, ['var(--accent)']);
     burst($('.hero.cheer .ring'), 44, 150, 110, ['#ffc85e', '#f0720a', 'var(--ink)', '#ffe2a8']);
   }
@@ -831,7 +1050,7 @@ function importData(file) {
       const s = JSON.parse(r.result);
       if (!s || !Array.isArray(s.habits) || s.habits.some(h => !h.id || !h.name || !Array.isArray(h.days))) throw 0;
       if (!confirm(`Replace everything on this device with this backup (${s.habits.length} habits)?`)) return;
-      state = {habits: s.habits, log: s.log || {}, notes: s.notes || {}};
+      state = {habits: s.habits, log: s.log || {}, notes: s.notes || {}, journal: s.journal || {}, reviews: s.reviews || []};
       save(); render(); toast('Backup restored');
     } catch (e) { toast('That file is not a valid backup'); }
   };
@@ -846,7 +1065,7 @@ function toast(msg) {
 
 /* ---------- events ---------- */
 document.addEventListener('click', e => {
-  const el = e.target.closest('[data-streak],[data-view],[data-toggle],[data-date],[data-new],[data-edit],[data-habit],[data-month],[data-slot],[data-dow],[data-cleartime],[data-close],[data-delete],[data-export],[data-import],[data-remind],[data-remindall]');
+  const el = e.target.closest('[data-streak],[data-view],[data-toggle],[data-date],[data-new],[data-edit],[data-habit],[data-month],[data-slot],[data-dow],[data-cleartime],[data-close],[data-delete],[data-export],[data-import],[data-remind],[data-remindall],[data-savekey],[data-removekey],[data-review],[data-ask],[data-period],[data-showreview]');
   if (!el) return;
   const d = el.dataset;
   if ('streak' in d) { calHabit = d.streak; calMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1); go('calendar'); }
@@ -867,6 +1086,17 @@ document.addEventListener('click', e => {
   else if ('dow' in d) { el.classList.toggle('on'); refreshRemind(); }
   else if ('cleartime' in d) { $('#f-time').value = ''; refreshRemind(); }
   else if ('remindall' in d) addReminders(state.habits.filter(h => h.time));
+  else if ('savekey' in d) {
+    const k = $('#f-key').value.trim();
+    if (!k) return $('#f-key').focus();
+    try { localStorage.setItem(KEY_API, k); } catch (err) { return toast('Could not store the key in this browser'); }
+    render(); toast('Key saved on this device');
+  }
+  else if ('removekey' in d) { if (confirm('Remove the API key from this device?')) { localStorage.removeItem(KEY_API); render(); } }
+  else if ('review' in d) reviewPeriod();
+  else if ('ask' in d) askCoach();
+  else if ('period' in d) { coachDays = +d.period; render(); }
+  else if ('showreview' in d) { coach.show = +d.showreview; coach.error = ''; render(); window.scrollTo({top: 0, behavior: 'smooth'}); }
   else if ('remind' in d) remindHabit();
   else if ('close' in d) closeSheet();
   else if ('delete' in d) deleteHabit();
@@ -875,9 +1105,15 @@ document.addEventListener('click', e => {
 });
 document.addEventListener('submit', e => { e.preventDefault(); saveHabit(); });
 document.addEventListener('input', e => {
-  if (e.target.id === 'note') {
+  const field = e.target.dataset.j;
+  if (field) {
     const v = e.target.value;
-    if (v.trim()) state.notes[day] = v; else delete state.notes[day];
+    if (field === 'note') { if (v.trim()) state.notes[day] = v; else delete state.notes[day]; }
+    else {
+      const j = state.journal[day] || (state.journal[day] = {});
+      if (v.trim()) j[field] = v; else delete j[field];
+      if (!Object.keys(j).length) delete state.journal[day];
+    }
     autosize(e.target);
     clearTimeout(noteTimer); noteTimer = setTimeout(flushNote, 400);
   }
@@ -893,6 +1129,8 @@ document.addEventListener('change', e => {
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && !modal.hidden) return closeSheet();
+  if (e.key === 'Enter' && e.target.id === 'f-ask') return askCoach();
+  if (e.key === 'Enter' && e.target.id === 'f-key') return $('[data-savekey]').click();
   const step = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0;
   if (!step || !modal.hidden || /INPUT|TEXTAREA/.test(document.activeElement.tagName)) return;
   if (shift(step)) slideIn(step);
@@ -914,7 +1152,7 @@ app.addEventListener('touchstart', e => {
     openSheet(state.habits.find(h => h.id === row.dataset.toggle));
   }, 480);
   // leave sideways scrollers, typing and the screen edges (system back gesture) alone
-  if (view === 'habits' || e.target.closest('.strip,.chips,textarea') || t.clientX < 24 || t.clientX > innerWidth - 24) return;
+  if ((view !== 'today' && view !== 'calendar') || e.target.closest('.strip,.chips,textarea') || t.clientX < 24 || t.clientX > innerWidth - 24) return;
   swipe = {x: t.clientX, y: t.clientY, dx: 0, dir: null};
 }, {passive: true});
 app.addEventListener('touchmove', e => {
@@ -979,7 +1217,7 @@ document.addEventListener('visibilitychange', () => {
   if (t !== lastToday) {                                   // app was left open past midnight
     if (day === lastToday) day = t;
     lastToday = t;
-    if (modal.hidden && document.activeElement.id !== 'note') render();
+    if (modal.hidden && !document.activeElement.dataset.j) render();
   }
 });
 window.addEventListener('pagehide', () => { if (noteTimer) flushNote(); });
