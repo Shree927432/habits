@@ -202,6 +202,17 @@ button{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
 }
 .sheet .fine{text-align:left;margin-top:18px}
 
+/* ---------- backup ---------- */
+.nudge{
+  display:flex;align-items:stretch;margin-top:14px;border-radius:18px;overflow:hidden;
+  background:color-mix(in srgb,var(--accent) 13%,transparent);font-size:14px;
+}
+.nudge button{padding:13px 14px;text-align:left}
+.nudge [data-backup]{flex:1;display:flex;align-items:center;gap:10px;line-height:1.35}
+.nudge [data-backup] svg{width:18px;height:18px;flex:none;color:var(--accent)}
+.nudge b{font-weight:700;white-space:nowrap}
+.nudge [data-snooze]{color:var(--muted);font-weight:600;font-size:13px}
+
 /* ---------- reflection ---------- */
 .journal label{display:block;padding:13px 18px 9px}
 .journal label + label{border-top:1px solid var(--line)}
@@ -375,14 +386,14 @@ nav button:active svg{transform:scale(.88)}
 
 <div id="modal" hidden></div>
 <div id="toast" role="status"></div>
-<input id="file" type="file" accept="application/json,.json" hidden>
+<input id="file" type="file" accept="application/json,text/plain,.json,.txt" hidden>
 
 <script>
 (() => {
 'use strict';
 
 /* ---------- constants ---------- */
-const APP_VERSION = 8;                     // keep in step with version.json on every release
+const APP_VERSION = 9;                     // keep in step with version.json on every release
 const KEY = 'habit-tracker.v1';
 const SLOTS = [['morning','Morning'],['afternoon','Afternoon'],['evening','Evening'],['anytime','Anytime']];
 const DAY_LETTER = ['M','T','W','T','F','S','S'];
@@ -395,6 +406,9 @@ const ICON = {
   plus: svg('<path d="M12 5v14M5 12h14"/>', 2.4),
   left: svg('<path d="M15 5l-7 7 7 7"/>'),
   right: svg('<path d="M9 5l7 7-7 7"/>'),
+  cloud: svg('<path d="M17.5 19a4.5 4.5 0 0 0 .6-8.96A6 6 0 0 0 6.4 11.4 3.9 3.9 0 0 0 7 19z"/>'),
+  sync: svg('<path d="M20 12a8 8 0 0 0-14-5.3L4 9"/><path d="M4 4v5h5"/><path d="M4 12a8 8 0 0 0 14 5.3L20 15"/><path d="M20 20v-5h-5"/>'),
+  file: svg('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>'),
   bell: svg('<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>'),
 };
 
@@ -416,9 +430,14 @@ function load() {
   } catch (e) {}
   return {habits: [], log: {}, notes: {}, journal: {}, reviews: []};
 }
+let lastJson = '';
 function save() {
-  try { localStorage.setItem(KEY, JSON.stringify(state)); }
+  const json = JSON.stringify(state);
+  if (json === lastJson) return;
+  lastJson = json;
+  try { localStorage.setItem(KEY, json); }
   catch (e) { toast('Could not save — storage is full or blocked'); }
+  queueDrive();
 }
 
 let state = load();
@@ -557,6 +576,147 @@ function refreshRemind() {
     : editing && editing.remind === now ? `Added for ${fmtTime(time)} · tap to add again`
     : editing && editing.remind ? 'Habit changed · tap to update the reminder'
     : `Alert at ${fmtTime(time)} on the days above`;
+}
+
+/* ---------- backup ----------
+   Two ways out of the phone: a one-tap file handed to Android's share sheet (pick Drive there),
+   and an automatic copy written to the user's Google Drive once they connect their account. */
+const GOOGLE_CLIENT_ID = '' || (() => { try { return localStorage.getItem('habit-tracker.gclient') || ''; } catch (e) { return ''; } })();
+const KEY_BACKUP = 'habit-tracker.backup';
+const DRIVE_NAME = 'Habits backup.json';
+const bk = (() => { try { return JSON.parse(localStorage.getItem(KEY_BACKUP)) || {}; } catch (e) { return {}; } })();   // {at, snooze, dirty, drive: {on, fileId, at}}
+const saveBk = () => { try { localStorage.setItem(KEY_BACKUP, JSON.stringify(bk)); } catch (e) {} };
+const daysSince = k => k ? Math.round((parse(today()) - parse(k)) / 864e5) : null;
+const hasData = () => state.habits.length > 0;
+const driveOn = () => !!(GOOGLE_CLIENT_ID && bk.drive && bk.drive.on);
+const ago = n => n === null ? 'Never backed up' : n === 0 ? 'Last backup today' : n === 1 ? 'Last backup yesterday' : `Last backup ${n} days ago`;
+
+async function shareBackup() {
+  const text = JSON.stringify(state, null, 2), name = `habits-backup-${today()}`;
+  const done = msg => { bk.at = today(); delete bk.snooze; saveBk(); render(); toast(msg); };
+  const file = new File([text], name + '.txt', {type: 'text/plain'});     // plain text: the one file type Android lets a web app share
+  if (navigator.canShare && navigator.canShare({files: [file]})) {
+    try { await navigator.share({files: [file], title: 'Habits backup'}); done('Backup shared'); } catch (e) { /* closed without sharing */ }
+    return;
+  }
+  download(name + '.json', text, 'application/json');
+  done('Backup file downloaded');
+}
+function applyBackup(s, from) {
+  if (!s || !Array.isArray(s.habits) || s.habits.some(h => !h.id || !h.name || !Array.isArray(h.days))) return toast('That is not a valid Habits backup');
+  if (!confirm(`Replace everything on this device with the backup from ${from} (${s.habits.length} habits)?`)) return;
+  state = {habits: s.habits, log: s.log || {}, notes: s.notes || {}, journal: s.journal || {}, reviews: s.reviews || []};
+  save(); render(); toast('Backup restored');
+}
+
+// --- Google Drive
+let gToken = '', gTokenExp = 0, gClient = null, driveBusy = false, driveTimer = null;
+const tokenOk = () => !!gToken && Date.now() < gTokenExp;
+function loadGis() {
+  if (window.google && google.accounts && google.accounts.oauth2) return Promise.resolve();
+  return new Promise((ok, fail) => {
+    const el = document.createElement('script');
+    el.src = 'https://accounts.google.com/gsi/client'; el.onload = ok; el.onerror = fail;
+    document.head.appendChild(el);
+  });
+}
+// Google's sign-in opens a window, which browsers only allow right after a tap
+function getToken() {
+  if (tokenOk()) return Promise.resolve(gToken);
+  return new Promise((ok, fail) => {
+    gClient = gClient || google.accounts.oauth2.initTokenClient({
+      client_id: GOOGLE_CLIENT_ID, scope: 'https://www.googleapis.com/auth/drive.file',   // only files this app creates
+      callback: () => {},
+    });
+    gClient.callback = r => {
+      if (r.error || !r.access_token) return fail(new Error(r.error || 'no token'));
+      gToken = r.access_token; gTokenExp = Date.now() + ((+r.expires_in || 3600) - 60) * 1000;
+      ok(gToken);
+    };
+    gClient.error_callback = e => fail(new Error(e && e.type || 'cancelled'));
+    gClient.requestAccessToken({prompt: ''});
+  });
+}
+async function gfetch(url, opt = {}) {
+  const r = await fetch(url, {...opt, headers: {Authorization: 'Bearer ' + gToken, ...(opt.headers || {})}});
+  if (r.status === 401) gToken = '';
+  if (!r.ok) throw Object.assign(new Error('Drive error ' + r.status), {status: r.status});
+  return r;
+}
+async function driveFind() {
+  const q = encodeURIComponent(`name='${DRIVE_NAME}' and trashed=false`);
+  const j = await (await gfetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,modifiedTime)&orderBy=modifiedTime%20desc&pageSize=1`)).json();
+  return j.files && j.files[0] || null;
+}
+async function driveUpload() {
+  const body = JSON.stringify(state);
+  if (!bk.drive.fileId) { const f = await driveFind(); if (f) bk.drive.fileId = f.id; }
+  if (bk.drive.fileId) {
+    try { await gfetch(`https://www.googleapis.com/upload/drive/v3/files/${bk.drive.fileId}?uploadType=media`, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body}); }
+    catch (e) { if (e.status !== 404) throw e; bk.drive.fileId = ''; }       // the file was deleted in Drive: make a new one
+  }
+  if (!bk.drive.fileId) {
+    const form = new FormData();
+    form.append('metadata', new Blob([JSON.stringify({name: DRIVE_NAME, mimeType: 'application/json'})], {type: 'application/json'}));
+    form.append('file', new Blob([body], {type: 'application/json'}));
+    bk.drive.fileId = (await (await gfetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {method: 'POST', body: form})).json()).id;
+  }
+  bk.drive.at = Date.now(); bk.at = today(); bk.dirty = false; saveBk();
+}
+// after every real change: remember there is something to save, and save soon if Google's permission is still fresh
+function queueDrive() {
+  if (!driveOn() || !hasData()) return;
+  bk.dirty = true; saveBk();
+  clearTimeout(driveTimer);
+  if (tokenOk()) driveTimer = setTimeout(() => driveSync(false), 20000);
+}
+// fromTap: we may ask Google for fresh permission (at most every 6 hours, so its window rarely flashes)
+async function driveSync(fromTap, force) {
+  if (!driveOn() || driveBusy || !navigator.onLine || !hasData()) return;
+  const stale = Date.now() - (bk.drive.at || 0) > 6 * 3600e3;
+  if (!tokenOk() && !(fromTap && (force || (bk.dirty && stale)))) return;
+  driveBusy = true;
+  try { await loadGis(); await getToken(); await driveUpload(); if (force) toast('Saved to Google Drive'); }
+  catch (e) { if (force) toast('Could not save to Google Drive'); }
+  driveBusy = false;
+  if (view === 'habits') render();
+}
+async function driveConnect() {
+  try { await loadGis(); await getToken(); } catch (e) { return toast('Google sign-in did not finish'); }
+  bk.drive = {on: true, fileId: '', at: 0};
+  try {
+    const found = await driveFind();
+    if (found) bk.drive.fileId = found.id;
+    saveBk();
+    if (found && !hasData()) { render(); return driveRestore(); }           // new phone: offer the saved copy, never overwrite it with nothing
+    if (hasData()) await driveUpload();
+    toast('Automatic backup is on');
+  } catch (e) { saveBk(); toast('Connected, but the first backup did not go through'); }
+  render();
+}
+async function driveRestore() {
+  try {
+    await loadGis(); await getToken();
+    const f = bk.drive.fileId ? {id: bk.drive.fileId} : await driveFind();
+    if (!f) return toast('No backup found in your Google Drive');
+    applyBackup(await (await gfetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`)).json(), 'Google Drive');
+  } catch (e) { toast('Could not read the backup from Google Drive'); }
+}
+function driveSheet() {
+  modal.innerHTML = `
+  <div class="scrim" data-close></div>
+  <div class="sheet">
+    <div class="grab"></div>
+    <h2>Google Drive backup</h2>
+    <p class="lead">Your data is saved to a file named <b>${DRIVE_NAME}</b> in your Drive whenever you use the app online. The app can only see that one file.</p>
+    <div class="card" style="margin-top:18px">
+      <button class="row" data-drivenow><span class="txt"><span class="name">Back up now</span></span></button>
+      <button class="row" data-driverestore><span class="txt"><span class="name">Restore from Drive</span></span></button>
+      <button class="row" data-driveoff><span class="txt"><span class="name" style="color:var(--danger)">Turn off automatic backup</span></span></button>
+    </div>
+    <div class="actions"><button type="button" class="btn" data-close>Done</button></div>
+  </div>`;
+  modal.hidden = false; modal.offsetHeight; modal.classList.add('open');
 }
 
 /* ---------- coach (Claude) ----------
@@ -781,6 +941,9 @@ function todayView() {
   const hr = new Date().getHours(), jr = state.journal[day] || {};
   const greeting = hr < 4 ? 'Up late' : hr < 12 ? 'Good morning' : hr < 17 ? 'Good afternoon' : 'Good evening';
   const left = list.length - n, perfect = list.length ? streaks(null).cur : 0;
+  const since = daysSince(bk.at), oldest = state.habits.reduce((m, h) => h.created < m ? h.created : m, t);
+  const backupDue = hasData() && !driveOn() && (since === null ? daysSince(oldest) >= 7 : since >= 7) && !(bk.snooze > t);
+  const nudge = backupDue ? `<div class="nudge"><button data-backup>${ICON.cloud}<span>${since === null ? 'Your data has never been backed up' : ago(since)}. <b>Back up now</b></span></button><button data-snooze aria-label="Remind me next week">Later</button></div>` : '';
   const hero = list.length ? `
   <section class="hero${ringFrom != null && pct === 1 ? ' cheer' : ''}">
     <div class="ring" data-to="${pct}" aria-label="${n} of ${list.length} done">
@@ -803,6 +966,7 @@ function todayView() {
   </header>
   <div class="strip" id="strip">${strip}</div>
   ${hero}
+  ${nudge}
   ${body}
   ${state.habits.length ? `<button class="add" data-new>${ICON.plus}Add habit</button>` : ''}
   <section class="group">
@@ -880,8 +1044,21 @@ function habitsView() {
       <span class="bellbox">${ICON.bell}</span>
       <span class="txt"><span class="name">Add all reminders to calendar</span><span class="sub">${timed ? `${timed} ${timed === 1 ? 'habit has' : 'habits have'} an exact time` : 'Give a habit an exact time first'}</span></span>
     </button></div></section>` : ''}
-  <div class="foot"><button data-export>Export backup</button><button data-import>Restore backup</button></div>
-  <p class="fine">Everything is stored only on this device.<br>Export a backup now and then to keep it safe.</p>
+  <section class="group"><p class="label">Backup</p><div class="card">
+    <button class="row" data-backup>
+      <span class="bellbox">${ICON.cloud}</span>
+      <span class="txt"><span class="name">Back up to Drive</span><span class="sub">${ago(daysSince(bk.at))} · one tap, then pick Drive</span></span>
+    </button>
+    <button class="row" data-drive${GOOGLE_CLIENT_ID ? '' : ' disabled'}>
+      <span class="bellbox">${ICON.sync}</span>
+      <span class="txt"><span class="name">Automatic Drive backup</span><span class="sub">${!GOOGLE_CLIENT_ID ? 'Needs a one-time Google setup' : !driveOn() ? 'Tap to connect your Google account' : bk.dirty ? 'On · changes waiting to be saved' : 'On · everything is saved'}</span></span>
+    </button>
+    <button class="row" data-import>
+      <span class="bellbox">${ICON.file}</span>
+      <span class="txt"><span class="name">Restore from a file</span><span class="sub">Bring back a backup you saved earlier</span></span>
+    </button>
+  </div></section>
+  <p class="fine">Your data lives on this phone. A backup is the only copy anywhere else.</p>
   <button class="linkish" data-update>Version ${APP_VERSION} · Check for updates</button>`;
 }
 
@@ -1036,29 +1213,9 @@ function deleteHabit() {
   save(); closeSheet(); render();
 }
 
-function exportData() {
-  const name = `habits-backup-${today()}.json`;
-  const blob = new Blob([JSON.stringify(state, null, 2)], {type: 'application/json'});
-  const file = new File([blob], name, {type: 'application/json'});
-  if (navigator.canShare && navigator.canShare({files: [file]})) {
-    navigator.share({files: [file]}).catch(() => {});
-    return;
-  }
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob); a.download = name; a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-}
 function importData(file) {
   const r = new FileReader();
-  r.onload = () => {
-    try {
-      const s = JSON.parse(r.result);
-      if (!s || !Array.isArray(s.habits) || s.habits.some(h => !h.id || !h.name || !Array.isArray(h.days))) throw 0;
-      if (!confirm(`Replace everything on this device with this backup (${s.habits.length} habits)?`)) return;
-      state = {habits: s.habits, log: s.log || {}, notes: s.notes || {}, journal: s.journal || {}, reviews: s.reviews || []};
-      save(); render(); toast('Backup restored');
-    } catch (e) { toast('That file is not a valid backup'); }
-  };
+  r.onload = () => { let data = null; try { data = JSON.parse(r.result); } catch (e) {} applyBackup(data, 'this file'); };
   r.readAsText(file);
 }
 
@@ -1070,7 +1227,9 @@ function toast(msg) {
 
 /* ---------- events ---------- */
 document.addEventListener('click', e => {
-  const el = e.target.closest('[data-streak],[data-view],[data-toggle],[data-date],[data-new],[data-edit],[data-habit],[data-month],[data-slot],[data-dow],[data-cleartime],[data-close],[data-delete],[data-export],[data-import],[data-remind],[data-remindall],[data-savekey],[data-removekey],[data-review],[data-ask],[data-period],[data-showreview],[data-update]');
+  // a tap is the only moment Google lets us renew permission (the Drive buttons handle that themselves)
+  if (bk.dirty && !e.target.closest('[data-drive],[data-drivenow],[data-driverestore],[data-driveoff]')) driveSync(true);
+  const el = e.target.closest('[data-streak],[data-view],[data-toggle],[data-date],[data-new],[data-edit],[data-habit],[data-month],[data-slot],[data-dow],[data-cleartime],[data-close],[data-delete],[data-export],[data-import],[data-remind],[data-remindall],[data-savekey],[data-removekey],[data-review],[data-ask],[data-period],[data-showreview],[data-update],[data-backup],[data-snooze],[data-drive],[data-drivenow],[data-driverestore],[data-driveoff]');
   if (!el) return;
   const d = el.dataset;
   if ('streak' in d) { calHabit = d.streak; calMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1); go('calendar'); }
@@ -1106,7 +1265,12 @@ document.addEventListener('click', e => {
   else if ('remind' in d) remindHabit();
   else if ('close' in d) closeSheet();
   else if ('delete' in d) deleteHabit();
-  else if ('export' in d) exportData();
+  else if ('backup' in d) shareBackup();
+  else if ('snooze' in d) { bk.snooze = addDays(today(), 7); saveBk(); render(); }
+  else if ('drivenow' in d) { closeSheet(); driveSync(true, true); }
+  else if ('driverestore' in d) { closeSheet(); driveRestore(); }
+  else if ('driveoff' in d) { bk.drive.on = false; gToken = ''; saveBk(); closeSheet(); render(); toast('Automatic backup is off'); }
+  else if ('drive' in d) { if (driveOn()) driveSheet(); else driveConnect(); }
   else if ('import' in d) $('#file').click();
 });
 document.addEventListener('submit', e => { e.preventDefault(); saveHabit(); });
@@ -1257,6 +1421,8 @@ async function checkUpdate(manual) {
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) checkUpdate(false); });
 checkUpdate(false);
+lastJson = JSON.stringify(state);                       // what is already on disk
+if (GOOGLE_CLIENT_ID) loadGis().catch(() => {});       // ready before the tap that needs it
 
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
