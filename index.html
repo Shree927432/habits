@@ -379,6 +379,7 @@ nav button:active svg{transform:scale(.88)}
 'use strict';
 
 /* ---------- constants ---------- */
+const APP_VERSION = 7;                     // keep in step with version.json on every release
 const KEY = 'habit-tracker.v1';
 const SLOTS = [['morning','Morning'],['afternoon','Afternoon'],['evening','Evening'],['anytime','Anytime']];
 const DAY_LETTER = ['M','T','W','T','F','S','S'];
@@ -877,7 +878,8 @@ function habitsView() {
       <span class="txt"><span class="name">Add all reminders to calendar</span><span class="sub">${timed ? `${timed} ${timed === 1 ? 'habit has' : 'habits have'} an exact time` : 'Give a habit an exact time first'}</span></span>
     </button></div></section>` : ''}
   <div class="foot"><button data-export>Export backup</button><button data-import>Restore backup</button></div>
-  <p class="fine">Everything is stored only on this device.<br>Export a backup now and then to keep it safe.</p>`;
+  <p class="fine">Everything is stored only on this device.<br>Export a backup now and then to keep it safe.</p>
+  <button class="linkish" data-update>Version ${APP_VERSION} · Check for updates</button>`;
 }
 
 function render() {
@@ -1065,7 +1067,7 @@ function toast(msg) {
 
 /* ---------- events ---------- */
 document.addEventListener('click', e => {
-  const el = e.target.closest('[data-streak],[data-view],[data-toggle],[data-date],[data-new],[data-edit],[data-habit],[data-month],[data-slot],[data-dow],[data-cleartime],[data-close],[data-delete],[data-export],[data-import],[data-remind],[data-remindall],[data-savekey],[data-removekey],[data-review],[data-ask],[data-period],[data-showreview]');
+  const el = e.target.closest('[data-streak],[data-view],[data-toggle],[data-date],[data-new],[data-edit],[data-habit],[data-month],[data-slot],[data-dow],[data-cleartime],[data-close],[data-delete],[data-export],[data-import],[data-remind],[data-remindall],[data-savekey],[data-removekey],[data-review],[data-ask],[data-period],[data-showreview],[data-update]');
   if (!el) return;
   const d = el.dataset;
   if ('streak' in d) { calHabit = d.streak; calMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1); go('calendar'); }
@@ -1093,6 +1095,7 @@ document.addEventListener('click', e => {
     render(); toast('Key saved on this device');
   }
   else if ('removekey' in d) { if (confirm('Remove the API key from this device?')) { localStorage.removeItem(KEY_API); render(); } }
+  else if ('update' in d) checkUpdate(true);
   else if ('review' in d) reviewPeriod();
   else if ('ask' in d) askCoach();
   else if ('period' in d) { coachDays = +d.period; render(); }
@@ -1225,6 +1228,32 @@ window.addEventListener('resize', () => {                 // keep the selected d
   const strip = $('#strip'), on = strip && strip.querySelector('.on');
   if (on) strip.scrollLeft = on.offsetLeft - strip.clientWidth / 2 + on.offsetWidth / 2;
 });
+
+// ---------- updates ----------
+// The app can stay open in the background for days, so ask the server which version is current
+// and reload onto it when that is safe (nothing being typed, no sheet open, coach idle).
+let lastCheck = 0;
+async function checkUpdate(manual) {
+  if (!manual && Date.now() - lastCheck < 60000) return;
+  lastCheck = Date.now();
+  let latest;
+  try { latest = (await (await fetch('version.json', {cache: 'no-store'})).json()).v; }
+  catch (e) { if (manual) toast('Could not check. Are you online?'); return; }
+  if (!(latest > APP_VERSION)) { if (manual) toast(`You have the latest version (${APP_VERSION})`); return; }
+  let tried = '';
+  try { tried = sessionStorage.getItem('updating-to'); sessionStorage.setItem('updating-to', latest); } catch (e) {}
+  const busy = !modal.hidden || coach.busy || /INPUT|TEXTAREA/.test(document.activeElement.tagName);
+  if (!manual && (busy || tried === String(latest))) return toast('An update is ready. Close and reopen the app.');
+  if (noteTimer) flushNote();
+  try {
+    if ('caches' in window) await Promise.all((await caches.keys()).map(k => caches.delete(k)));
+    const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration();
+    if (reg) await reg.update();
+  } catch (e) {}
+  location.reload();
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) checkUpdate(false); });
+checkUpdate(false);
 
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
